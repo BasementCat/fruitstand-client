@@ -10,11 +10,16 @@ import subprocess
 import time
 import re
 import platform
+from threading import (
+    Thread,
+    Event
+    )
+import copy
 
 logging.basicConfig(level = logging.ERROR)
 
 args = {}
-config = {
+default_config = {
     "verbosity": 0,
     "url": "",
     "not_fruitstand": False,
@@ -22,6 +27,7 @@ config = {
     "browser": "midori",
     "tags": {"id": platform.node()}
 }
+config = {}
 logger = logging.getLogger()
 
 candidate_config_file_name = "fruitstand-client.conf"
@@ -34,6 +40,9 @@ candidate_config_file_dirs = (
 browsers = {
     "midori": "midori -e Fullscreen -a \"%s\""
 }
+
+stop_main = Event()
+stop_app = Event()
 
 def question(prompt, prompt_end = ": ", options = [], default = None, case_sensitive = False, empty = False):
     real_prompt = prompt
@@ -232,7 +241,15 @@ def configure_app():
 
     sys.exit(0)
 
+def stop(stop_do_poll_thread = False, do_stop_main = False, do_stop_app = False):
+    if do_stop_main:
+        stop_main.set()
+    if do_stop_app:
+        stop_app.set()
+
 def main():
+    parse_cli_args()
+    load_config()
     logger.debug("Setting up browser string and finding browser")
     qs = "?"
     for k,v in config["tags"].items():
@@ -249,17 +266,33 @@ def main():
         browser_args[0] = real_command
     logger.debug("Final browser command: %s", repr(browser_args))
 
-    while True:
+    while not stop_main.is_set():
         logger.info("Running '%s'", " ".join(browser_args))
         browser = subprocess.Popen(browser_args)
-        while browser.poll() is None:
-            time.sleep(1)
-        if browser.returncode == 0:
-            logger.info("Browser exited with return code 0")
-        else:
-            logger.error("Browser exited with unexpected return code %d", browser.returncode)
+        try:
+            while browser.poll() is None and not stop_main.wait(1):
+                pass
+        except KeyboardInterrupt:
+            stop(True, True, True)
+
+        if browser.poll() is None:
+            if browser.returncode == 0:
+                logger.info("Browser exited with return code 0")
+            else:
+                logger.error("Browser exited with unexpected return code %d", browser.returncode)
+
+        if stop_main.is_set():
+            if browser.poll() is None:
+                logger.info("Stopping browser - SIGTERM")
+                browser.terminate()
+                time.sleep(1)
+                if browser.poll() is None:
+                    logger.error("Browser ignored SIGTERM, sending SIGKILL")
+                    browser.kill()
 
 if __name__ == "__main__":
-    parse_cli_args()
-    load_config()
-    main()
+    while not stop_app.is_set():
+        args = {}
+        config = copy.deepcopy(default_config)
+        main()
+    logger.info("Bye")
